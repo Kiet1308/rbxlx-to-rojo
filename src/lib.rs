@@ -22,15 +22,97 @@ lazy_static::lazy_static! {
     static ref RESPECTED_SERVICES: HashSet<&'static str> = include_str!("./respected-services.txt").lines().collect();
 }
 
+const RESERVED_WINDOWS_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "conin$",
+    "conout$",
+];
+
 struct TreeIterator<'a, I: InstructionReader + ?Sized> {
     instruction_reader: &'a mut I,
     path: &'a Path,
     tree: &'a WeakDom,
 }
 
+fn reserved_windows_name_index(component: &str) -> Option<usize> {
+    let stem = component.split('.').next().unwrap_or(component);
+    let trimmed_stem = stem.trim_end_matches(' ');
+    let lower_stem = trimmed_stem.to_ascii_lowercase();
+
+    if RESERVED_WINDOWS_NAMES.contains(&lower_stem.as_str()) {
+        Some(trimmed_stem.len())
+    } else {
+        None
+    }
+}
+
+fn sanitize_path_component(name: &str) -> String {
+    let mut component = String::new();
+
+    for character in name.chars() {
+        match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => component.push('_'),
+            _ if character.is_control() => component.push('_'),
+            _ => component.push(character),
+        }
+    }
+
+    while component.ends_with(' ') || component.ends_with('.') {
+        component.pop();
+        component.push('_');
+    }
+
+    if component.is_empty() {
+        component.push('_');
+    }
+
+    if let Some(index) = reserved_windows_name_index(&component) {
+        component.insert(index, '_');
+    }
+
+    component
+}
+
+fn unique_path_component(name: &str, used_components: &mut HashSet<String>) -> String {
+    let base_component = sanitize_path_component(name);
+    let mut component = base_component.clone();
+    let mut counter = 2;
+
+    while !used_components.insert(component.to_lowercase()) {
+        component = format!("{}__{}", base_component, counter);
+        counter += 1;
+    }
+
+    component
+}
+
+fn child_path_components(
+    tree: &WeakDom,
+    instance: &Instance,
+    has_scripts: &HashMap<Ref, bool>,
+) -> HashMap<Ref, String> {
+    let mut used_components = HashSet::new();
+    let mut child_components = HashMap::new();
+
+    for child_id in instance.children() {
+        if has_scripts.get(child_id) != Some(&true) {
+            continue;
+        }
+
+        let child = tree.get_by_ref(*child_id).expect("got fake child id?");
+        child_components.insert(
+            *child_id,
+            unique_path_component(&child.name, &mut used_components),
+        );
+    }
+
+    child_components
+}
+
 fn repr_instance<'a>(
     base: &'a Path,
     child: &'a Instance,
+    path_component: &str,
     has_scripts: &'a HashMap<Ref, bool>,
 ) -> Option<(Vec<Instruction<'a>>, Cow<'a, Path>)> {
     if has_scripts.get(&child.referent()) != Some(&true) {
@@ -39,7 +121,7 @@ fn repr_instance<'a>(
 
     match child.class.as_str() {
         "Folder" => {
-            let folder_path = base.join(&child.name);
+            let folder_path = base.join(path_component);
             let owned: Cow<'a, Path> = Cow::Owned(folder_path);
             let clone = owned.clone();
             Some((
@@ -80,7 +162,9 @@ fn repr_instance<'a>(
             if child.children().is_empty() {
                 Some((
                     vec![Instruction::CreateFile {
-                        filename: Cow::Owned(base.join(format!("{}{}.lua", child.name, extension))),
+                        filename: Cow::Owned(
+                            base.join(format!("{}{}.lua", path_component, extension)),
+                        ),
                         contents: Cow::Borrowed(source),
                     }],
                     Cow::Borrowed(base),
@@ -104,7 +188,7 @@ fn repr_instance<'a>(
                     .count();
 
                 let total_children_count = child.children().len();
-                let folder_path: Cow<'a, Path> = Cow::Owned(base.join(&child.name));
+                let folder_path: Cow<'a, Path> = Cow::Owned(base.join(path_component));
 
                 // If there's no script children, make a named meta file
                 // If there's some script children, make a folder with a meta file
@@ -130,13 +214,13 @@ fn repr_instance<'a>(
                         vec![
                             Instruction::CreateFile {
                                 filename: Cow::Owned(
-                                    base.join(format!("{}{}.lua", child.name, extension)),
+                                    base.join(format!("{}{}.lua", path_component, extension)),
                                 ),
                                 contents: Cow::Borrowed(source),
                             },
                             Instruction::CreateFile {
                                 filename: Cow::Owned(
-                                    base.join(format!("{}.meta.json", child.name)),
+                                    base.join(format!("{}.meta.json", path_component)),
                                 ),
                                 contents: meta_contents,
                             },
@@ -182,7 +266,7 @@ fn repr_instance<'a>(
                             return None;
                         }
 
-                        let new_base: Cow<'a, Path> = Cow::Owned(base.join(&child.name));
+                        let new_base: Cow<'a, Path> = Cow::Owned(base.join(path_component));
                         let mut instructions = Vec::new();
 
                         if !NON_TREE_SERVICES.contains(other_class) {
@@ -206,7 +290,7 @@ fn repr_instance<'a>(
             }
 
             // If there are scripts, we'll need to make a .meta.json folder
-            let folder_path: Cow<'a, Path> = Cow::Owned(base.join(&child.name));
+            let folder_path: Cow<'a, Path> = Cow::Owned(base.join(path_component));
             let meta = MetaFile {
                 class_name: Some(child.class.clone()),
                 // properties: properties.into_iter().collect(),
@@ -236,16 +320,25 @@ fn repr_instance<'a>(
 
 impl<'a, I: InstructionReader + ?Sized> TreeIterator<'a, I> {
     fn visit_instructions(&mut self, instance: &Instance, has_scripts: &HashMap<Ref, bool>) {
+        let path_components = child_path_components(self.tree, instance, has_scripts);
+
         for child_id in instance.children() {
             let child = self.tree.get_by_ref(*child_id).expect("got fake child id?");
+            let path_component = path_components
+                .get(child_id)
+                .map(String::as_str)
+                .unwrap_or_else(|| child.name.as_str());
 
             let (instructions_to_create_base, path) = if child.class == "StarterPlayer" {
                 // We can't respect StarterPlayer as a service, because then Rojo
                 // tries to delete StarterPlayerScripts and whatnot, which is not valid.
-                let folder_path: Cow<'a, Path> = Cow::Owned(self.path.join(&child.name));
+                let folder_path: Cow<'a, Path> = Cow::Owned(self.path.join(path_component));
                 let mut instructions = Vec::new();
 
                 if has_scripts.get(child_id) == Some(&true) {
+                    let starter_player_path_components =
+                        child_path_components(self.tree, child, has_scripts);
+
                     instructions.push(Instruction::CreateFolder {
                         folder: folder_path.clone(),
                     });
@@ -260,11 +353,15 @@ impl<'a, I: InstructionReader + ?Sized> TreeIterator<'a, I> {
                                 .filter(|id| has_scripts.get(id) == Some(&true))
                                 .map(|child_id| {
                                     let child = self.tree.get_by_ref(*child_id).unwrap();
+                                    let child_path_component = starter_player_path_components
+                                        .get(child_id)
+                                        .map(String::as_str)
+                                        .unwrap_or_else(|| child.name.as_str());
                                     (
                                         child.name.clone(),
                                         Instruction::partition(
                                             &child,
-                                            folder_path.join(&child.name),
+                                            folder_path.join(child_path_component),
                                         ),
                                     )
                                 })
@@ -277,7 +374,7 @@ impl<'a, I: InstructionReader + ?Sized> TreeIterator<'a, I> {
 
                 (instructions, folder_path)
             } else {
-                match repr_instance(&self.path, child, has_scripts) {
+                match repr_instance(&self.path, child, path_component, has_scripts) {
                     Some((instructions_to_create_base, path)) => {
                         (instructions_to_create_base, path)
                     }

@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-11
+### Fixed
+- Sanitized Roblox instance names before creating files and folders on Windows.
+- Created nested output directories when using the command-line output path.
+
 ## [1.0.1] - 2021-04-11
 ### Fixed
 - Fixed newer builds not being usable.

@@ -49,7 +49,7 @@ impl FileSystem {
         let source = root.join(SRC);
         let project = Project::new();
 
-        fs::create_dir(&source).ok(); // It'll error later if it matters
+        fs::create_dir_all(&source).ok(); // It'll error later if it matters
 
         Self {
             project,
@@ -76,7 +76,7 @@ impl InstructionReader for FileSystem {
                     partition.path = Some(PathBuf::from(SRC).join(path));
                 }
 
-                for mut child in partition.children.values_mut() {
+                for child in partition.children.values_mut() {
                     if let Some(path) = &child.path {
                         child.path = Some(PathBuf::from(SRC).join(path));
                     }

@@ -82,7 +82,7 @@ impl InstructionReader for VirtualFileSystem {
                             let tree = rbx_xml::from_str_default(&contents_string)
                                 .expect("couldn't decode encoded xml");
                             let child_id = tree.root().children()[0];
-                            let child_instance = tree.get_by_ref(child_id).unwrap().clone();
+                            let child_instance = tree.get_by_ref(child_id).unwrap();
                             VirtualFileContents::Instance(child_instance.properties.to_owned())
                         } else {
                             VirtualFileContents::Bytes(contents_string)
@@ -102,6 +102,35 @@ impl InstructionReader for VirtualFileSystem {
             }
         }
     }
+}
+
+#[test]
+fn sanitizes_path_components_for_windows() {
+    assert_eq!(
+        crate::sanitize_path_component("oldSakuyaLol?"),
+        "oldSakuyaLol_"
+    );
+    assert_eq!(
+        crate::sanitize_path_component("a/b\\c:d*e?f\"g<h>i|"),
+        "a_b_c_d_e_f_g_h_i_"
+    );
+    assert_eq!(crate::sanitize_path_component("name."), "name_");
+    assert_eq!(crate::sanitize_path_component("name "), "name_");
+    assert_eq!(crate::sanitize_path_component("CON.txt"), "CON_.txt");
+}
+
+#[test]
+fn makes_sanitized_path_components_unique() {
+    let mut used_components = std::collections::HashSet::new();
+
+    assert_eq!(
+        crate::unique_path_component("same?", &mut used_components),
+        "same_"
+    );
+    assert_eq!(
+        crate::unique_path_component("same*", &mut used_components),
+        "same___2"
+    );
 }
 
 #[test]
